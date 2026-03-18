@@ -60,10 +60,18 @@ public class ListingGui {
         while (guiItems.containsKey(nextSlot) && nextSlot < rows * 9) {
             nextSlot++;
         }
+        if (nextSlot >= rows * 9) {
+            return;
+        }
+
         this.guiItems.put(nextSlot, guiItem);
     }
 
     public void addItem(int index, TebexGuiItem guiItem) {
+        if (index < 0 || index >= rows * 9) {
+            return;
+        }
+
         this.guiItems.put(index, guiItem);
     }
 
@@ -74,7 +82,13 @@ public class ListingGui {
         for (Map.Entry<Integer,TebexGuiItem> guiItems : guiItems.entrySet()) {
             TebexGuiItem guiItem = guiItems.getValue();
             ItemStack stack = guiItem.getStack();
-            this.inventory.setStack(guiItems.getKey(), stack);
+
+            int slot = guiItems.getKey();
+            if (slot < 0 || slot >= this.inventory.size()) {
+                continue;
+            }
+
+            this.inventory.setStack(slot, stack);
         }
 
         player.openHandledScreen(new SimpleNamedScreenHandlerFactory(

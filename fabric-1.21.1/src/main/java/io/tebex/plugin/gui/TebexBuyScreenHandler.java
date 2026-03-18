@@ -28,7 +28,7 @@ public class TebexBuyScreenHandler extends GenericContainerScreenHandler {
             return;
         }
 
-        if (slotId > this.getInventory().size()) { // Ignore slot clicks outsize of the buy inventory
+        if (slotId >= this.getInventory().size()) { // Ignore slot clicks outside of the buy inventory
             return;
         }
 

@@ -10,7 +10,6 @@ import io.tebex.sdk.obj.ICategory;
 import io.tebex.sdk.obj.SubCategory;
 import net.minecraft.component.DataComponentTypes;
 import net.minecraft.item.Item;
-import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.registry.Registries;
 import net.minecraft.screen.GenericContainerScreenHandler;
@@ -20,11 +19,16 @@ import net.minecraft.text.*;
 import net.minecraft.util.Identifier;
 
 import java.text.DecimalFormat;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.function.IntConsumer;
 import java.util.stream.Collectors;
 
 public class BuyGUI {
+    private static final int MIN_ROWS = 1;
+    private static final int MAX_ROWS = 6;
+
     private final TebexPlugin platform;
     private final YamlDocument config;
 
@@ -47,7 +51,7 @@ public class BuyGUI {
     }
 
     private String convertToLegacyString(String str) {
-        return str.replace("&", "§");
+        return str.replace("&", "\u00A7");
     }
 
     public void open(ServerPlayerEntity player) {
@@ -58,76 +62,217 @@ public class BuyGUI {
             return;
         }
 
-        int rows = config.getInt("gui.menu.home.rows") < 1 ? categories.size() / 9 + 1 : config.getInt("gui.menu.home.rows");
-        ListingGui listingGui = new ListingGui(rows, getScreenHandlerType(rows), player);
-        listingGui.setTitle(Text.of(convertToLegacyString(config.getString("gui.menu.home.title", "Server Shop"))).getString());
+        openHomeMenu(player, categories, 0);
+    }
 
-        categories.sort(Comparator.comparingInt(Category::getOrder));
+    private void openHomeMenu(ServerPlayerEntity player, List<Category> categories, int page) {
+        List<Category> sortedCategories = new ArrayList<>(categories);
+        sortedCategories.sort(Comparator.comparingInt(Category::getOrder));
 
-        categories.forEach(category -> listingGui.addItem(getCategoryItemBuilder(category).asGuiItem(action -> {
-                    listingGui.close();
-                    openCategoryMenu(player, category);
-                }
-        )));
+        List<TebexGuiItem> homeItems = new ArrayList<>();
+        sortedCategories.forEach(category -> homeItems.add(getCategoryItemBuilder(category).asGuiItem(action -> {
+            action.setCancelled(true);
+            openCategoryMenu(player, category);
+        })));
 
-        platform.executeBlocking(listingGui::open);
+        openPagedMenu(
+                player,
+                config.getString("gui.menu.home.title", "Server Shop"),
+                config.getInt("gui.menu.home.rows"),
+                homeItems,
+                null,
+                targetPage -> openHomeMenu(player, sortedCategories, targetPage),
+                page
+        );
     }
 
     private void openCategoryMenu(ServerPlayerEntity player, ICategory category) {
-        int rows = config.getInt("gui.menu.category.rows") < 1 ? category.getPackages().size() / 9 + 1 : config.getInt("gui.menu.category.rows");
+        openCategoryMenu(player, category, 0);
+    }
 
-        ListingGui subListingGui = new ListingGui(rows, getScreenHandlerType(rows), player);
-        subListingGui.setTitle(Text.of(convertToLegacyString(config.getString("gui.menu.category.title").replace("%category%", category.getName()))).getString());
+    private void openCategoryMenu(ServerPlayerEntity player, ICategory category, int page) {
+        List<TebexGuiItem> categoryItems = new ArrayList<>();
+        String title = config.getString("gui.menu.category.title", "Viewing %category%")
+                .replace("%category%", category.getName());
 
-        category.getPackages().sort(Comparator.comparingInt(CategoryPackage::getOrder));
+        TebexGuiItem backItem = getBackItemBuilder().asGuiItem(action -> {
+            action.setCancelled(true);
+            open(player);
+        });
 
         if (category instanceof Category cat) {
             if (cat.getSubCategories() != null) {
-                cat.getSubCategories().forEach(subCategory -> subListingGui.addItem(getCategoryItemBuilder(subCategory).asGuiItem(action -> {
+                cat.getSubCategories().forEach(subCategory -> categoryItems.add(getCategoryItemBuilder(subCategory).asGuiItem(action -> {
+                    action.setCancelled(true);
                     openCategoryMenu(player, subCategory);
                 })));
-
-                TebexGuiItem backItem = getBackItemBuilder().asGuiItem(action -> {
-                    action.setCancelled(true);
-                    open(player);
-                });
-                int backItemSlot = subListingGui.getRows() * 9 - 5;
-                subListingGui.addItem(backItemSlot, backItem);
-                //subListingGui.setItem(backItemSlot, backItem);
             }
         } else if (category instanceof SubCategory) {
             SubCategory subCategory = (SubCategory) category;
-
-            subListingGui.setTitle(Text.of(convertToLegacyString(config.getString("gui.menu.sub-category.title"))
+            title = config.getString("gui.menu.sub-category.title", "Viewing %sub_category% (%category%)")
                     .replace("%category%", subCategory.getParent().getName())
-                    .replace("%sub_category%", category.getName())).getString());
+                    .replace("%sub_category%", category.getName());
 
-            TebexGuiItem backItem = getBackItemBuilder().asGuiItem(action -> {
+            backItem = getBackItemBuilder().asGuiItem(action -> {
                 action.setCancelled(true);
                 openCategoryMenu(player, subCategory.getParent());
             });
-            int backItemSlot = subListingGui.getRows() * 9 - 5;
-
-            subListingGui.addItem(backItemSlot, backItem);
-            //subListingGui.setItem(subListingGui.getRows() * 9 - 5,backItem);
         }
 
-        category.getPackages().forEach(categoryPackage -> subListingGui.addItem(getPackageItemBuilder(categoryPackage).asGuiItem(action -> {
-            player.closeHandledScreen();
+        List<CategoryPackage> categoryPackages = new ArrayList<>(category.getPackages());
+        categoryPackages.sort(Comparator.comparingInt(CategoryPackage::getOrder));
 
-            // Create Checkout Url
-            platform.getSDK().createCheckoutUrl(categoryPackage.getId(), player.getName().getString()).thenAccept(checkout -> {
-                player.sendMessage(Text.of("§aYou can checkout here: "), false);
-                player.sendMessage(MutableText.of(PlainTextContent.of("§a"+checkout.getUrl())).setStyle(Style.EMPTY.withClickEvent(
-                        new ClickEvent(ClickEvent.Action.OPEN_URL, checkout.getUrl()))), false);
-            }).exceptionally(ex -> {
-                player.sendMessage(Text.of("§cFailed to create checkout URL. Please contact an administrator."), false);
-                platform.error("Failed to create checkout URL for a user.", ex);
-                return null;
+        categoryPackages.forEach(categoryPackage -> {
+            TebexItemBuilder packageItemBuilder = getPackageItemBuilder(categoryPackage);
+            if (packageItemBuilder == null) {
+                return;
+            }
+
+            categoryItems.add(packageItemBuilder.asGuiItem(action -> {
+                action.setCancelled(true);
+                player.closeHandledScreen();
+
+                // Create Checkout Url
+                platform.getSDK().createCheckoutUrl(categoryPackage.getId(), player.getName().getString()).thenAccept(checkout -> {
+                    player.sendMessage(Text.of("\u00A7aYou can checkout here: "), false);
+                    player.sendMessage(MutableText.of(PlainTextContent.of("\u00A7a" + checkout.getUrl())).setStyle(Style.EMPTY.withClickEvent(
+                            new ClickEvent(ClickEvent.Action.OPEN_URL, checkout.getUrl()))), false);
+                }).exceptionally(ex -> {
+                    player.sendMessage(Text.of("\u00A7cFailed to create checkout URL. Please contact an administrator."), false);
+                    platform.error("Failed to create checkout URL for a user.", ex);
+                    return null;
+                });
+            }));
+        });
+
+        openPagedMenu(
+                player,
+                title,
+                config.getInt("gui.menu.category.rows"),
+                categoryItems,
+                backItem,
+                targetPage -> openCategoryMenu(player, category, targetPage),
+                page
+        );
+    }
+
+    private void openPagedMenu(
+            ServerPlayerEntity player,
+            String title,
+            int configuredRows,
+            List<TebexGuiItem> contentItems,
+            TebexGuiItem backItem,
+            IntConsumer openPageAction,
+            int page
+    ) {
+        int rows = resolveRows(configuredRows, contentItems.size(), backItem != null);
+        int totalPages = getTotalPages(contentItems.size(), rows, backItem != null);
+        int currentPage = Math.max(0, Math.min(page, totalPages - 1));
+        boolean hasNavigation = totalPages > 1;
+
+        ListingGui listingGui = new ListingGui(rows, getScreenHandlerType(rows), player);
+        listingGui.setTitle(Text.of(convertToLegacyString(title)).getString());
+
+        List<Integer> contentSlots = getContentSlots(rows, backItem != null, hasNavigation);
+        int pageSize = Math.max(1, contentSlots.size());
+        int startIndex = currentPage * pageSize;
+        int endIndex = Math.min(startIndex + pageSize, contentItems.size());
+
+        for (int i = startIndex; i < endIndex; i++) {
+            int slot = contentSlots.get(i - startIndex);
+            listingGui.addItem(slot, contentItems.get(i));
+        }
+
+        if (backItem != null) {
+            listingGui.addItem(getBackSlot(rows), backItem);
+        }
+
+        if (hasNavigation && currentPage > 0) {
+            TebexGuiItem previousItem = getNavigationItemBuilder(false).asGuiItem(action -> {
+                action.setCancelled(true);
+                openPageAction.accept(currentPage - 1);
             });
-        })));
+            listingGui.addItem(getPreviousPageSlot(rows), previousItem);
+        }
 
-        subListingGui.open();
+        if (hasNavigation && currentPage < totalPages - 1) {
+            TebexGuiItem nextItem = getNavigationItemBuilder(true).asGuiItem(action -> {
+                action.setCancelled(true);
+                openPageAction.accept(currentPage + 1);
+            });
+            listingGui.addItem(getNextPageSlot(rows), nextItem);
+        }
+
+        listingGui.open();
+    }
+
+    private int resolveRows(int configuredRows, int contentItems, boolean hasBackButton) {
+        if (configuredRows > 0) {
+            return clampRows(configuredRows);
+        }
+
+        int reservedSlots = hasBackButton ? 1 : 0;
+        int neededRows = (int) Math.ceil((contentItems + reservedSlots) / 9.0);
+        return clampRows(Math.max(neededRows, MIN_ROWS));
+    }
+
+    private int clampRows(int rows) {
+        return Math.max(MIN_ROWS, Math.min(MAX_ROWS, rows));
+    }
+
+    private int getTotalPages(int contentItems, int rows, boolean hasBackButton) {
+        int pageSizeWithoutNavigation = getPageSize(rows, hasBackButton, false);
+        int totalPages = Math.max(1, (int) Math.ceil(contentItems / (double) pageSizeWithoutNavigation));
+
+        if (totalPages > 1) {
+            int pageSizeWithNavigation = getPageSize(rows, hasBackButton, true);
+            totalPages = Math.max(1, (int) Math.ceil(contentItems / (double) pageSizeWithNavigation));
+        }
+
+        return totalPages;
+    }
+
+    private int getPageSize(int rows, boolean hasBackButton, boolean hasNavigation) {
+        int reservedSlots = (hasBackButton ? 1 : 0) + (hasNavigation ? 2 : 0);
+        return Math.max(1, rows * 9 - reservedSlots);
+    }
+
+    private List<Integer> getContentSlots(int rows, boolean hasBackButton, boolean hasNavigation) {
+        int inventorySize = rows * 9;
+        int backSlot = hasBackButton ? getBackSlot(rows) : -1;
+        int previousPageSlot = hasNavigation ? getPreviousPageSlot(rows) : -1;
+        int nextPageSlot = hasNavigation ? getNextPageSlot(rows) : -1;
+
+        List<Integer> slots = new ArrayList<>(inventorySize);
+        for (int slot = 0; slot < inventorySize; slot++) {
+            if (slot == backSlot || slot == previousPageSlot || slot == nextPageSlot) {
+                continue;
+            }
+            slots.add(slot);
+        }
+
+        return slots;
+    }
+
+    private int getBackSlot(int rows) {
+        return rows * 9 - 5;
+    }
+
+    private int getPreviousPageSlot(int rows) {
+        return rows * 9 - 6;
+    }
+
+    private int getNextPageSlot(int rows) {
+        return rows * 9 - 4;
+    }
+
+    private TebexItemBuilder getNavigationItemBuilder(boolean isNextPage) {
+        String title = isNextPage ? "&aNext Page" : "&aPrevious Page";
+
+        return TebexItemBuilder.from(Items.ARROW)
+                .hideFlags(DataComponentTypes.ENCHANTMENTS, DataComponentTypes.ATTRIBUTE_MODIFIERS, DataComponentTypes.UNBREAKABLE)
+                .name(remapLegacyFormatSeparator(italicize(title)))
+                .lore(List.of());
     }
 
     private TebexItemBuilder getCategoryItemBuilder(ICategory category) {
@@ -161,7 +306,6 @@ public class BuyGUI {
         String name = section.getString("name");
         List<String> lore = section.getStringList("lore");
 
-
         MutableText guiName = MutableText.of(PlainTextContent.of(convertToLegacyString(name != null ? handlePlaceholders(categoryPackage, name) : categoryPackage.getName()))).setStyle(Style.EMPTY.withItalic(true));
         List<String> guiLore = lore.stream().map(line -> MutableText.of(PlainTextContent.of(convertToLegacyString(handlePlaceholders(categoryPackage, line)))).setStyle(Style.EMPTY.withItalic(true)).getString()).collect(Collectors.toList());
 
@@ -188,7 +332,7 @@ public class BuyGUI {
 
         return TebexItemBuilder.from(material.asItem() != null ? material : Items.BOOK)
                 .hideFlags(DataComponentTypes.ENCHANTMENTS, DataComponentTypes.ATTRIBUTE_MODIFIERS, DataComponentTypes.UNBREAKABLE)
-                .name(Text.of(convertToLegacyString(name != null ? name : "§fBack")).getString())
+                .name(Text.of(convertToLegacyString(name != null ? name : "\u00A7fBack")).getString())
                 .lore(lore.stream().map(line -> ((MutableText)(Text.of(convertToLegacyString(line)))).setStyle(Style.EMPTY.withItalic(true)).getString()).collect(Collectors.toList()));
     }
 
@@ -215,10 +359,10 @@ public class BuyGUI {
     }
 
     private String italicize(String input) {
-        return "§o" + input + "§r";
+        return "\u00A7o" + input + "\u00A7r";
     }
 
     private String remapLegacyFormatSeparator(String input) {
-        return input.replaceAll("&", "§");
+        return input.replaceAll("&", "\u00A7");
     }
 }
