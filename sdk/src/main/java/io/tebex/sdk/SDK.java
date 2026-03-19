@@ -357,6 +357,20 @@ public class SDK {
         return request("/checkout").withBody(GSON.toJson(payload)).withSecretKey(secretKey).sendAsync().thenApply(response -> {
             if(response.code() == 404) {
                 throw new CompletionException(new ServerNotFoundException());
+            } else if(response.code() == 400) {
+                try {
+                    ResponseBody responseBody = response.body();
+                    if (responseBody != null) {
+                        JsonObject jsonObject = GSON.fromJson(responseBody.string(), JsonObject.class);
+                        if (jsonObject != null && jsonObject.has("error_message")) {
+                            throw new CompletionException(new IOException(jsonObject.get("error_message").getAsString()));
+                        }
+                    }
+                } catch (IOException e) {
+                    throw new CompletionException(new IOException("Unexpected response when creating checkout url for package " + packageId + ". " + e.getMessage()));
+                }
+
+                throw new CompletionException(new IOException("Unexpected status code (" + response.code() + ")"));
             } else if(response.code() != 201) {
                 throw new CompletionException(new IOException("Unexpected status code (" + response.code() + ")"));
             }
