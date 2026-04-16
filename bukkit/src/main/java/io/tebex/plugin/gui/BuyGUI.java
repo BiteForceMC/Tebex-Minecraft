@@ -4,6 +4,7 @@ import io.tebex.plugin.BukkitPluginPlatform;
 import io.tebex.plugin.util.MaterialUtil;
 import io.tebex.sdk.obj.Category;
 import io.tebex.sdk.obj.CategoryPackage;
+import io.tebex.sdk.obj.CheckoutUrl;
 import io.tebex.sdk.obj.ICategory;
 import io.tebex.sdk.obj.SubCategory;
 import org.bukkit.ChatColor;
@@ -15,7 +16,11 @@ import org.bukkit.inventory.ItemFlag;
 
 import java.text.DecimalFormat;
 import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
 public class BuyGUI {
@@ -52,6 +57,111 @@ public class BuyGUI {
         });
 
         platform.executeBlocking(() -> listingGui.open(player));
+    }
+
+    public void open(Player player, String menu) {
+        if (menu == null || menu.trim().isEmpty()) {
+            open(player);
+            return;
+        }
+
+        List<Category> categories = platform.getStoreCategories();
+        if (categories == null) {
+            player.sendMessage(ChatColor.RED + "Failed to get listing. Please contact an administrator.");
+            return;
+        }
+
+        ICategory matchedCategory = resolveCategoryByInput(categories, menu);
+        if (matchedCategory == null) {
+            player.sendMessage(ChatColor.RED + "Store category '" + menu + "' was not found.");
+            return;
+        }
+
+        openCategoryMenu(player, matchedCategory);
+    }
+
+    public List<String> getMenuSuggestions(String input) {
+        List<Category> categories = platform.getStoreCategories();
+        if (categories == null) {
+            return java.util.Collections.emptyList();
+        }
+
+        String normalizedInput = normalizeMenuInput(input);
+        Set<String> suggestions = new LinkedHashSet<>();
+
+        for (Category category : categories) {
+            addSuggestionValues(category, suggestions);
+            if (category.getSubCategories() != null) {
+                for (SubCategory subCategory : category.getSubCategories()) {
+                    addSuggestionValues(subCategory, suggestions);
+                }
+            }
+        }
+
+        return suggestions.stream()
+                .filter(menuKey -> normalizedInput.isEmpty() || menuKey.startsWith(normalizedInput))
+                .collect(Collectors.toList());
+    }
+
+    private ICategory findCategoryByInput(List<Category> categories, String input) {
+        String normalizedInput = normalizeMenuInput(input);
+        for (Category category : categories) {
+            if (isMenuMatch(category, input, normalizedInput)) {
+                return category;
+            }
+
+            if (category.getSubCategories() != null) {
+                for (SubCategory subCategory : category.getSubCategories()) {
+                    if (isMenuMatch(subCategory, input, normalizedInput)) {
+                        return subCategory;
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private ICategory resolveCategoryByInput(List<Category> categories, String input) {
+        ICategory matchedCategory = findCategoryByInput(categories, input);
+        if (matchedCategory != null) {
+            return matchedCategory;
+        }
+
+        List<String> suggestions = getMenuSuggestions(input);
+        if (suggestions.size() == 1) {
+            return findCategoryByInput(categories, suggestions.get(0));
+        }
+
+        return null;
+    }
+
+    private boolean isMenuMatch(ICategory category, String input, String normalizedInput) {
+        return String.valueOf(category.getId()).equalsIgnoreCase(input)
+                || category.getName().equalsIgnoreCase(input)
+                || toMenuKey(category.getName()).equals(normalizedInput);
+    }
+
+    private void addSuggestionValues(ICategory category, Set<String> suggestions) {
+        String menuKey = toMenuKey(category.getName());
+        if (!menuKey.isEmpty()) {
+            suggestions.add(menuKey);
+        }
+    }
+
+    private String toMenuKey(String input) {
+        return normalizeMenuInput(input);
+    }
+
+    private String normalizeMenuInput(String input) {
+        if (input == null) {
+            return "";
+        }
+
+        return input.trim()
+                .toLowerCase(Locale.ROOT)
+                .replaceAll("[^a-z0-9]+", "-")
+                .replaceAll("^-+|-+$", "");
     }
 
     private void openCategoryMenu(Player player, ICategory category) {
@@ -110,18 +220,78 @@ public class BuyGUI {
                     action.setCancelled(true);
                     player.closeInventory();
 
-                    // Create Checkout Url
-                    platform.getSDK().createCheckoutUrl(categoryPackage.getId(), player.getName())
-                            .thenAccept(checkout -> {
-                                platform.sendCheckoutLink(player.getName(), checkout.getUrl());
-                            }).exceptionally(ex -> {
-                                player.sendMessage(ChatColor.RED
-                                        + "Failed to create checkout URL. Please contact an administrator.");
-                                return null;
-                            });
+                    createCheckoutForPlayer(player, categoryPackage);
                 })));
 
         platform.executeBlocking(() -> subListingGui.open(player));
+    }
+
+    private void createCheckoutForPlayer(Player player, CategoryPackage categoryPackage) {
+        String recipientName = player.getName();
+        String checkoutUsername = platform.resolveCheckoutUsername(recipientName);
+
+        createCheckoutUrlWithFallback(categoryPackage.getId(), checkoutUsername, recipientName)
+                .thenAccept(checkout -> platform.sendCheckoutLink(recipientName, checkout.getUrl()))
+                .exceptionally(ex -> {
+                    sendWebstoreFallback(player, categoryPackage, checkoutUsername, ex);
+                    return null;
+                });
+    }
+
+    private CompletableFuture<CheckoutUrl> createCheckoutUrlWithFallback(int packageId, String preferredUsername,
+                                                                          String fallbackUsername) {
+        CompletableFuture<CheckoutUrl> checkoutFuture = new CompletableFuture<>();
+
+        platform.getSDK().createCheckoutUrl(packageId, preferredUsername).whenComplete((checkout, error) -> {
+            if (error == null) {
+                checkoutFuture.complete(checkout);
+                return;
+            }
+
+            if (preferredUsername.equalsIgnoreCase(fallbackUsername)) {
+                checkoutFuture.completeExceptionally(error);
+                return;
+            }
+
+            platform.debug("Checkout URL creation failed for username '" + preferredUsername
+                    + "'. Retrying with '" + fallbackUsername + "'.");
+            platform.getSDK().createCheckoutUrl(packageId, fallbackUsername).whenComplete((retryCheckout, retryError) -> {
+                if (retryError == null) {
+                    checkoutFuture.complete(retryCheckout);
+                    return;
+                }
+
+                checkoutFuture.completeExceptionally(retryError);
+            });
+        });
+
+        return checkoutFuture;
+    }
+
+    private void sendWebstoreFallback(Player player, CategoryPackage categoryPackage, String attemptedUsername,
+                                      Throwable throwable) {
+        String fallbackUrl = platform.getWebstoreUrl();
+        player.sendMessage(ChatColor.RED + "Unable to create a direct checkout link for this package.");
+        player.sendMessage(ChatColor.YELLOW + "Open the webstore to continue: " + fallbackUrl);
+
+        platform.warning(
+                "Failed to create checkout URL for package " + categoryPackage.getId() + " and player '"
+                        + attemptedUsername + "': " + getErrorMessage(throwable),
+                "The player has been sent the webstore URL as a fallback."
+        );
+    }
+
+    private String getErrorMessage(Throwable throwable) {
+        Throwable current = throwable;
+        while (current != null && current.getCause() != null) {
+            current = current.getCause();
+        }
+
+        if (current == null || current.getMessage() == null || current.getMessage().trim().isEmpty()) {
+            return "Unknown error";
+        }
+
+        return current.getMessage();
     }
 
     private TebexItemBuilder getCategoryItemBuilder(ICategory category) {

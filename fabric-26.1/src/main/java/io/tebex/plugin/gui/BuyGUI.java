@@ -24,7 +24,10 @@ import net.minecraft.world.item.Items;
 import java.net.URI;
 import java.text.DecimalFormat;
 import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 public class BuyGUI {
@@ -74,6 +77,111 @@ public class BuyGUI {
         )));
 
         platform.executeBlocking(listingGui::open);
+    }
+
+    public void open(ServerPlayer player, String menu) {
+        if (menu == null || menu.trim().isEmpty()) {
+            open(player);
+            return;
+        }
+
+        List<Category> categories = platform.getStoreCategories();
+        if (categories == null) {
+            player.sendSystemMessage(Component.nullToEmpty("Failed to get listing. Please contact an administrator."), false);
+            return;
+        }
+
+        ICategory matchedCategory = resolveCategoryByInput(categories, menu);
+        if (matchedCategory == null) {
+            player.sendSystemMessage(Component.nullToEmpty("Store category '" + menu + "' was not found."), false);
+            return;
+        }
+
+        openCategoryMenu(player, matchedCategory);
+    }
+
+    public List<String> getMenuSuggestions(String input) {
+        List<Category> categories = platform.getStoreCategories();
+        if (categories == null) {
+            return java.util.Collections.emptyList();
+        }
+
+        String normalizedInput = normalizeMenuInput(input);
+        Set<String> suggestions = new LinkedHashSet<>();
+
+        for (Category category : categories) {
+            addSuggestionValues(category, suggestions);
+            if (category.getSubCategories() != null) {
+                for (SubCategory subCategory : category.getSubCategories()) {
+                    addSuggestionValues(subCategory, suggestions);
+                }
+            }
+        }
+
+        return suggestions.stream()
+                .filter(menuKey -> normalizedInput.isEmpty() || menuKey.startsWith(normalizedInput))
+                .collect(Collectors.toList());
+    }
+
+    private ICategory findCategoryByInput(List<Category> categories, String input) {
+        String normalizedInput = normalizeMenuInput(input);
+        for (Category category : categories) {
+            if (isMenuMatch(category, input, normalizedInput)) {
+                return category;
+            }
+
+            if (category.getSubCategories() != null) {
+                for (SubCategory subCategory : category.getSubCategories()) {
+                    if (isMenuMatch(subCategory, input, normalizedInput)) {
+                        return subCategory;
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private ICategory resolveCategoryByInput(List<Category> categories, String input) {
+        ICategory matchedCategory = findCategoryByInput(categories, input);
+        if (matchedCategory != null) {
+            return matchedCategory;
+        }
+
+        List<String> suggestions = getMenuSuggestions(input);
+        if (suggestions.size() == 1) {
+            return findCategoryByInput(categories, suggestions.get(0));
+        }
+
+        return null;
+    }
+
+    private boolean isMenuMatch(ICategory category, String input, String normalizedInput) {
+        return String.valueOf(category.getId()).equalsIgnoreCase(input)
+                || category.getName().equalsIgnoreCase(input)
+                || toMenuKey(category.getName()).equals(normalizedInput);
+    }
+
+    private void addSuggestionValues(ICategory category, Set<String> suggestions) {
+        String menuKey = toMenuKey(category.getName());
+        if (!menuKey.isEmpty()) {
+            suggestions.add(menuKey);
+        }
+    }
+
+    private String toMenuKey(String input) {
+        return normalizeMenuInput(input);
+    }
+
+    private String normalizeMenuInput(String input) {
+        if (input == null) {
+            return "";
+        }
+
+        return input.trim()
+                .toLowerCase(Locale.ROOT)
+                .replaceAll("[^a-z0-9]+", "-")
+                .replaceAll("^-+|-+$", "");
     }
 
     private void openCategoryMenu(ServerPlayer player, ICategory category) {

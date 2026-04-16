@@ -183,9 +183,21 @@ public final class TebexFoliaPlugin extends JavaPlugin {
             ServerPlatformConfig config = (ServerPlatformConfig) platform.getPlatformConfig();
             if (config.isBuyCommandEnabled()) {
                 commandMap.register(config.getBuyCommandName(), new BuyCommand(config.getBuyCommandName(), platform));
+                syncCommands();
             }
         } catch (Throwable e) {
             platform.error("Failed to register buy command: " + e.getMessage(), e);
+        }
+    }
+
+    private void syncCommands() {
+        try {
+            Method syncMethod = Bukkit.getServer().getClass().getMethod("syncCommands");
+            syncMethod.invoke(Bukkit.getServer());
+        } catch (NoSuchMethodException ignored) {
+            // Older server versions do not expose command sync.
+        } catch (Throwable e) {
+            platform.debug("Failed to sync command tree after buy command registration: " + e.getMessage());
         }
     }
 }

@@ -257,6 +257,71 @@ public abstract class BasePluginPlatform implements PluginPlatform {
         PluginPlatform.super.sendCheckoutLink(playerName, checkoutUrl);
     }
 
+    /**
+     * Resolves the username to use when creating a checkout URL.
+     *
+     * Bedrock players connected through Floodgate often have a prefixed Java username (for example ".PlayerName"),
+     * while checkout APIs may expect the unprefixed username.
+     *
+     * @param playerName The online player's current server username.
+     * @return The preferred username for checkout requests.
+     */
+    public String resolveCheckoutUsername(String playerName) {
+        String normalizedPlayerName = normalizeCandidate(playerName);
+        if (normalizedPlayerName.isEmpty()) {
+            return normalizedPlayerName;
+        }
+
+        UUID playerUniqueId = getPlayerUniqueId(normalizedPlayerName);
+        if (playerUniqueId == null) {
+            return normalizedPlayerName;
+        }
+
+        try {
+            FloodgateApi api = FloodgateApi.getInstance();
+            if (!api.isFloodgatePlayer(playerUniqueId)) {
+                return normalizedPlayerName;
+            }
+
+            FloodgatePlayer floodgatePlayer = api.getPlayer(playerUniqueId);
+            String prefix = api.getPlayerPrefix();
+
+            return firstNonBlank(
+                    stripFloodgatePrefix(floodgatePlayer == null ? null : floodgatePlayer.getCorrectUsername(), prefix),
+                    stripFloodgatePrefix(floodgatePlayer == null ? null : floodgatePlayer.getUsername(), prefix),
+                    stripFloodgatePrefix(floodgatePlayer == null ? null : floodgatePlayer.getJavaUsername(), prefix),
+                    stripFloodgatePrefix(normalizedPlayerName, prefix),
+                    normalizedPlayerName
+            );
+        } catch (IllegalStateException | NoClassDefFoundError e) {
+            warnMissingFloodgateApi();
+            return normalizedPlayerName;
+        } catch (Exception e) {
+            debug("Failed to resolve checkout username for player '" + normalizedPlayerName + "': " + e.getMessage());
+            return normalizedPlayerName;
+        }
+    }
+
+    /**
+     * @return The public webstore URL for this connected store.
+     */
+    public String getWebstoreUrl() {
+        if (storeInformation == null || storeInformation.getStore() == null) {
+            return "https://tebex.io";
+        }
+
+        String domain = normalizeCandidate(storeInformation.getStore().getDomain());
+        if (domain.isEmpty()) {
+            return "https://tebex.io";
+        }
+
+        if (domain.startsWith("http://") || domain.startsWith("https://")) {
+            return domain;
+        }
+
+        return "https://" + domain;
+    }
+
     private UUID resolveFloodgateUniqueId(QueuedPlayer player) {
         if (!isGeyser()) {
             return null;
@@ -323,9 +388,40 @@ public abstract class BasePluginPlatform implements PluginPlatform {
         }
 
         warning(
-                "Received a Bedrock XUID for command placeholder resolution, but the Floodgate API is unavailable.",
-                "Install Floodgate on the same server or proxy running Tebex so {id}/{uuid} placeholders can be resolved for Bedrock players."
+                "Bedrock player handling requires Floodgate API access, but the API is unavailable.",
+                "Install Floodgate on the same server or proxy running Tebex so Bedrock IDs, placeholders, and checkout usernames can be resolved."
         );
+    }
+
+    private String stripFloodgatePrefix(String username, String prefix) {
+        String normalized = normalizeCandidate(username);
+        if (normalized.isEmpty()) {
+            return normalized;
+        }
+
+        if (prefix == null || prefix.isEmpty()) {
+            return normalized;
+        }
+
+        if (normalized.startsWith(prefix) && normalized.length() > prefix.length()) {
+            return normalized.substring(prefix.length());
+        }
+
+        return normalized;
+    }
+
+    private String firstNonBlank(String... values) {
+        for (String value : values) {
+            String normalized = normalizeCandidate(value);
+            if (!normalized.isEmpty()) {
+                return normalized;
+            }
+        }
+        return "";
+    }
+
+    private String normalizeCandidate(String value) {
+        return value == null ? "" : value.trim();
     }
 
     /**

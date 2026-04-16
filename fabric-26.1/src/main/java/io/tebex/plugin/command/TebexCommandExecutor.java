@@ -31,7 +31,13 @@ public class TebexCommandExecutor {
         ServerPlatformConfig config = (ServerPlatformConfig) platform.getPlatformConfig();
         if (config.isBuyCommandEnabled()) {
             BuyCommand buyCommand = new BuyCommand(platform);
-            dispatcher.register(literal(config.getBuyCommandName()).executes(buyCommand::execute));
+            dispatcher.register(
+                    literal(config.getBuyCommandName())
+                            .executes(buyCommand::execute)
+                            .then(argument("menu", StringArgumentType.greedyString())
+                                    .suggests(buyCommand::suggestMenus)
+                                    .executes(buyCommand::executeWithMenu))
+            );
             platform.debug("buy command registered as: " + config.getBuyCommandName());
         }
 
