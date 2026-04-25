@@ -622,7 +622,22 @@ public class SDK {
                         }
                         return _batchServerEvents(events, offset, newBatchSize); // Retry with smaller batch size
                     } else if (response.code() != 204) {
-                        this.platform.error("Unexpected status code when sending server events", new IOException("Unexpected status code (" + response.code() + ")"));
+                        String errorBody = "";
+                        ResponseBody responseBody = response.body();
+                        if (responseBody != null) {
+                            try {
+                                errorBody = responseBody.string();
+                            } catch (IOException ignored) {
+                                // nothing else to do; we'll still log the status code below
+                            }
+                        }
+
+                        String message = "Unexpected status code (" + response.code() + ")";
+                        if (!errorBody.isEmpty()) {
+                            message += ": " + errorBody;
+                        }
+
+                        this.platform.error("Unexpected status code when sending server events", new IOException(message));
                         return CompletableFuture.completedFuture(false);
                     }
 
